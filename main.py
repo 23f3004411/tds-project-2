@@ -261,7 +261,7 @@ SYSTEM_PROMPT = (
     "Always produce exactly the final answer format requested in questions.txt "
     "(for example, a JSON array or object). Never hard-code answers; compute them. "
     "When returning plots, ensure data URIs are PNG and stay under 100,000 bytes."
-    "Use only pandas as pd, numpy as np, duckdb and duckdb, matplotlib as plt, seaborn as sns in python. NO OTHER LIBRARY!"
+    "Use only pandas as pd, numpy as np, duckdb and duckdb, matplotlib as plt, seaborn as sns in python. NO OTHER LIBRARY! No need To convert anything to Base64 yourself, just give a plot"
 )
 
 def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
