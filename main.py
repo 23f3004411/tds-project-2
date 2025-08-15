@@ -148,6 +148,7 @@ def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
         "duckdb": duckdb,
         "plt": plt,
         "sns": sns,
+        "io": io,
         "inputs": inputs,
     }
     local_vars: Dict[str, Any] = {}
@@ -181,6 +182,7 @@ def tool_plot_png(code: str) -> Dict[str, Any]:
         "np": np,
         "plt": plt,
         "sns": sns,
+        "io": io,
     }
     local_vars: Dict[str, Any] = {}
     stdout_capture = io.StringIO()
