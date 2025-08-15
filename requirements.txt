@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pandas
+matplotlib
+duckdb
+numpy
+python-multipart
+langchain-openai
+langchain-core
+langchain
+requests
+beautifulsoup4
+dotenv
