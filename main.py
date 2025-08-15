@@ -1,238 +1,425 @@
-import os, sys
-import traceback
-
 import io
+import os
+import re
 import json
 import base64
-import uvicorn
+import traceback
+from typing import Dict, Any, List, Tuple
+
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS 
+from werkzeug.utils import secure_filename
+
+from dotenv import load_dotenv
+
+# Web, code, and plotting libs for tools
+import requests  # for fetching web pages [used by the web tool]
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import networkx as nx
-from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+import duckdb
 from bs4 import BeautifulSoup
-import requests
 
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.tools import tool
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import PromptTemplate
-from langchain import hub
+# Plotting and encoding figure to base64 data URI
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
 
+# OpenAI SDK (Chat Completions) - the official Python library [12]
+from openai import OpenAI
+
+import logging
+from logging import StreamHandler, Formatter
+
+# Configure logging
+logger = logging.getLogger("agent")
+logger.setLevel(logging.INFO)
+handler = StreamHandler()
+handler.setFormatter(Formatter(fmt="%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(handler)
+
+def _preview(label: str, obj, limit=500):
+    try:
+        s = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        s = str(obj)
+    s = s if len(s) <= limit else s[:limit] + "... [truncated]"
+    logger.info("%s: %s", label, s)
+
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
 load_dotenv()
 
-app = FastAPI(
-    title="Data Analyst Agent API",
-    description="An agent that uses LLMs to source, prepare, analyze, and visualize data.",
-    version="1.6.0"
-)
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # set this in environment
+MAX_IMAGE_BYTES = 6_500  # cap for base64 data URIs (approx, after encoding)
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/agent_uploads")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable not set.")
+app = Flask(__name__)
 
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0,
-    api_key=OPENAI_API_KEY,
-)
+CORS(app, resources={
+    r"/api/": {
+        "origins": "*",        
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": False,
+        "max_age": 600
+    }
+})
 
-@tool
-def scrape_webpage(url: str) -> str:
+logger.info("CORS enabled for /api/ with origins=*, methods=POST,OPTIONS")
+
+# -----------------------------------------------------------------------------
+# Utility: encode matplotlib figure to data URI under a size budget [13][19][10]
+# -----------------------------------------------------------------------------
+
+def fig_to_data_uri_png(fig, max_bytes=MAX_IMAGE_BYTES):
+    def encode(dpi):
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+        return data_uri
+    for dpi in (120, 96, 80, 72, 60, 45, 30, 20, 15):
+        uri = encode(dpi)
+        if len(uri.encode("utf-8")) <= max_bytes:
+            return uri
+    raise ValueError("Image exceeds size budget; simplify plot or reduce points.")
+
+# -----------------------------------------------------------------------------
+# Tool implementations
+# -----------------------------------------------------------------------------
+
+def tool_web_fetch(url: str) -> Dict[str, Any]:
     """
-    Scrapes the text content from a given URL.
-    Use this tool to get information from a webpage to answer questions.
+    Fetch a web page and return:
+    {
+      "url": str,
+      "status": int,
+      "html": str,
+      "tables": List[List[Dict[str, Any]]],  # parsed tables via pandas.read_html if possible
+      "title": str
+    }
     """
+    logger.info("[tool:web_fetch] GET %s", url)
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url.strip(), headers=headers, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        return ' '.join(soup.get_text().split())
-    except requests.RequestException as e:
-        return f"Error scraping URL {url}: {e}"
+        resp = requests.get(url, timeout=20)
+        logger.info("[tool:web_fetch] status=%s length=%s", resp.status_code, len(resp.text or ""))
+        status = resp.status_code
+        html = resp.text if resp.ok else ""
+        title = ""
+        tables = []
+        if html:
+            soup = BeautifulSoup(html, "html.parser")
+            title_tag = soup.find("title")
+            title = title_tag.text.strip() if title_tag else ""
+            try:
+                # Use pandas to parse HTML tables directly if any
+                dfs = pd.read_html(html)
+                logger.info("[tool:web_fetch] parsed %d tables", len(dfs))
+                # Convert to records for LLM consumption
+                for df in dfs:
+                    tables.append(json.loads(df.to_json(orient="records")))
+            except ValueError:
+                logger.info("[tool:web_fetch] no HTML tables found")
+                # No tables found
+                pass
+        return {"url": url, "status": status, "html": html, "tables": tables, "title": title}
+    except Exception as e:
+        logger.exception("[tool:web_fetch] error: %s", e)
+        return {"url": url, "status": 0, "error": str(e), "html": "", "tables": [], "title": ""}
 
-CODE_GEN_PROMPT = PromptTemplate.from_template(
-"""You are an expert Python data analyst. A pandas DataFrame named `df` has been pre-loaded in memory.
+def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute user/LLM generated Python code in a constrained namespace.
+    Provides pandas, numpy, duckdb, matplotlib.pyplot as plt, seaborn as sns, and a dict 'inputs'.
+    Returns {"stdout": str, "vars": dict (json-serializable best-effort), "error": str|None}.
+    """
+    _preview("[tool:run_code] inputs", list(inputs.keys()) if isinstance(inputs, dict) else type(inputs).__name__)
+    _preview("[tool:run_code] code", code, limit=800)
+    # Very constrained, no file writes; read-only files via provided paths in inputs
+    allowed_globals = {
+        "pd": pd,
+        "np": np,
+        "duckdb": duckdb,
+        "plt": plt,
+        "sns": sns,
+        "inputs": inputs,
+    }
+    local_vars: Dict[str, Any] = {}
+    stdout_capture = io.StringIO()
+    try:
+        # Redirect prints
+        import contextlib, sys
+        with contextlib.redirect_stdout(stdout_capture):
+            exec(code, allowed_globals, local_vars)
+        # Best-effort JSON-ify locals
+        def safe(obj):
+            try:
+                json.dumps(obj)
+                return obj
+            except TypeError:
+                return str(obj)
+        serializable_vars = {k: safe(v) for k, v in local_vars.items() if not k.startswith("_")}
+        return {"stdout": stdout_capture.getvalue(), "vars": serializable_vars, "error": None}
+    except Exception as e:
+        logger.exception("[tool:run_code] error")
+        return {"stdout": stdout_capture.getvalue(), "vars": {}, "error": f"{e}\n{traceback.format_exc()}"}
 
-** DATA IF NOT AVAIABLE USE THIS: (RAW FILE)**
-{df_json_str}
+def tool_plot_png(code: str) -> Dict[str, Any]:
+    """
+    Execute plotting code that creates a Matplotlib figure and returns a base64 data URI PNG.
+    The code should end with 'fig = plt.gcf()' or create a figure assigned to 'fig'.
+    """
+    _preview("[tool:plot_png] code", code, limit=800)
+    allowed_globals = {
+        "pd": pd,
+        "np": np,
+        "plt": plt,
+        "sns": sns,
+    }
+    local_vars: Dict[str, Any] = {}
+    stdout_capture = io.StringIO()
+    try:
+        import contextlib
+        with contextlib.redirect_stdout(stdout_capture):
+            exec(code, allowed_globals, local_vars)
+        fig = local_vars.get("fig", plt.gcf())
+        if not fig:
+            raise ValueError("No figure found; ensure code assigns 'fig = plt.gcf()' or creates a figure.")
+        uri = fig_to_data_uri_png(fig, MAX_IMAGE_BYTES)
+        logger.info("[tool:plot_png] data_uri_size=%d bytes", len(uri.encode("utf-8")))
+        return {"data_uri": uri, "stdout": stdout_capture.getvalue(), "error": None}
+    except Exception as e:
+        logger.exception("[tool:plot_png] error")
+        return {"data_uri": None, "stdout": stdout_capture.getvalue(), "error": f"{e}\n{traceback.format_exc()}"}
 
-**DataFrame Structure:**
-{df_structure}
+# -----------------------------------------------------------------------------
+# OpenAI tool definitions (function calling) [14][12]
+# -----------------------------------------------------------------------------
 
-Your task is to write a Python script to answer the question: {question}
+def get_tool_schemas() -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "web_fetch",
+            "description": "Fetch a webpage by URL, parse title and HTML tables where possible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP/HTTPS URL to fetch"}
+                },
+                "required": ["url"],
+            },
+        },
+        {
+            "name": "run_code",
+            "description": "Execute Python code for data analysis using pandas/numpy/duckdb. Access uploaded file paths via provided 'inputs'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to execute"},
+                    "inputs": {"type": "object", "description": "Named inputs such as file paths or small data"},
+                },
+                "required": ["code", "inputs"],
+            },
+        },
+        {
+            "name": "plot_png",
+            "description": "Generate a Matplotlib plot and return a base64 data URI under 100,000 bytes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code that builds a plot and sets 'fig' variable"},
+                },
+                "required": ["code"],
+            },
+        },
+    ]
 
-**VERY IMPORTANT:**
-- DO NOT try to load any data or read any files (e.g., do not use `pd.read_csv`).
-- You MUST use the existing DataFrame named `df` with the structure provided above.
+def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if name == "web_fetch":
+        return tool_web_fetch(**arguments)
+    if name == "run_code":
+        return tool_run_code(**arguments)
+    if name == "plot_png":
+        return tool_plot_png(**arguments)
+    return {"error": f"Unknown tool: {name}"}
 
-**Instructions:**
-1.  Use the pandas, matplotlib, and networkx libraries.
-2.  The final output MUST be stored in a variable `result`.
-3.  The `result` must be the final answer (e.g., number, string, list, or a base64 plot).
-4.  If plotting, the `result` MUST be a base64 encoded data URI string.
-5.  The script must be a direct sequence of commands, not a function.
-6.  Return ONLY the raw Python code. Do not use markdown fences or add explanations.
+# -----------------------------------------------------------------------------
+# Core agent loop
+# -----------------------------------------------------------------------------
 
-**Plotting Example:**
-import io, base64, matplotlib.pyplot as plt
-plt.figure(figsize=(8, 6))
-plt.scatter(df['col_a'], df['col_b'])
-plt.xlabel('Column A'); plt.ylabel('Column B'); plt.title('Scatter Plot')
-buf = io.BytesIO()
-plt.savefig(buf, format='png', bbox_inches='tight')
-buf.seek(0)
-result = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode('utf-8')
-plt.close()
-
-**Non-Plotting Example:**
-result = len(df)
-"""
+SYSTEM_PROMPT = (
+    "You are an agentic AI that reads a questions.txt, optional extra files, "
+    "and uses tools to fetch web data, analyze with Python, and plot. "
+    "Always produce exactly the final answer format requested in questions.txt "
+    "(for example, a JSON array or object). Never hard-code answers; compute them. "
+    "When returning plots, ensure data URIs are PNG and stay under 100,000 bytes."
+    "Use only pandas as pd, numpy as np, duckdb and duckdb, matplotlib as plt, seaborn as sns in python. NO OTHER LIBRARY!"
 )
 
-@tool
-def analyze_dataframe(question: str, df_json_string: str) -> str:
+def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
     """
-    Analyzes a pandas DataFrame to answer a question by generating and executing Python code.
-    - question: The question or task to perform on the DataFrame.
-    - df_json_string: The DataFrame in JSON format with 'split' orientation.
+    Orchestrates a Chat Completions loop with function calling until a final answer is produced.
+    questions_text: content of questions.txt
+    file_index: map of uploaded filename -> saved path on disk
+    Returns final model text.
     """
-    python_code = ""
-    try:
-        df = pd.read_json(io.StringIO(df_json_string), orient='split')
-        
-        if df.empty:
-            return "Error: The provided data is empty."
+    tools = get_tool_schemas()
+    _preview("[agent] questions.txt", questions_text, limit=1200)
+    _preview("[agent] uploaded_files", file_index)
 
-        df_head = df.head().to_string()
-        df_structure = f"Columns: {df.columns.tolist()}\n\nFirst 5 rows:\n{df_head}"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            "Here is questions.txt followed by an index of uploaded files.\n\n"
+            f"questions.txt:\n{questions_text}\n\n"
+            f"uploaded_files:\n{json.dumps(file_index, indent=2)}\n"
+            "Use tools as needed. If code is required, write it and run it via run_code. "
+            "For plots, use plot_png and return the data URI."
+        )},
+    ]
+    turn = 0
+    while True:
+        turn += 1
+        logger.info("[agent] requesting completion (turn=%d)", turn)
+        _preview("[agent] messages->", messages, limit=1200)
 
-        code_generation_prompt = CODE_GEN_PROMPT.format(
-            question=question,
-            df_structure=df_structure,
-            df_json_str = df_json_string
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            tools=[{"type": "function", "function": t} for t in tools],
+            tool_choice="auto",
+            temperature=0.0,
         )
-        response = llm.invoke(code_generation_prompt)
-        python_code = response.content.strip()
 
-        local_vars = {'df': df}
-        exec_globals = {
-            'pd': pd, 'np': np, 'plt': plt,
-            'io': io, 'base64': base64, 'nx': nx
-        }
+        msg = completion.choices[0].message
 
-        exec(python_code, exec_globals, local_vars)
-
-        result = local_vars.get('result')
-        if result is None:
-            return "Error: The generated code did not produce a 'result' variable. This might be due to an error in the code that was not caught."
-        
-        if isinstance(result, (pd.Series, pd.DataFrame)):
-            return result.to_json(orient='split')
-        if isinstance(result, np.generic):
-            return str(result.item())
-        return str(result)
-
-    except Exception as e:
-        print(traceback.format_exc())
-        return f"An error occurred while executing the generated Python code. Please analyze this error and try again.\n--- ERROR ---\n{type(e).__name__}: {e}\n--- ATTEMPTED CODE ---\n{python_code}"
-
-@app.post("/api/")
-async def data_analyst_endpoint(
-    questions_file: UploadFile = File(..., alias="questions.txt"),
-    attachments: Optional[List[UploadFile]] = File(None)
-):
-    questions_text = (await questions_file.read()).decode('utf-8')
-    
-    df_json_str = ""
-    if attachments:
-        attachment = attachments[0]
-        file_content = await attachment.read()
-        try:
-            if attachment.filename.endswith('.csv'):
-                df = pd.read_csv(io.StringIO(file_content.decode('utf-8')))
-                df_json_str = df.to_json(orient='split')
-            elif attachment.filename.endswith('.json'):
-                df_json_str = file_content.decode('utf-8')
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Error processing file {attachment.filename}: {e}")
-
-    tools_for_this_request = [scrape_webpage]
-
-    if df_json_str:
-        @tool
-        def analyze_provided_data(question: str) -> str:
-            """Use this tool ONLY to answer a question about the provided data file. The input for this tool is the user's question."""
-            return analyze_dataframe.invoke({
-                "question": question,
-                "df_json_string": df_json_str
+        # If the assistant requests tools, run them and append tool messages
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            # Append the assistant message that requested tools
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or None,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                for tc in tool_calls],
             })
-        
-        tools_for_this_request.append(analyze_provided_data)
 
-    prompt = hub.pull("hwchase17/react")
+            # For each tool call, execute and add a corresponding tool message
+            for tc in tool_calls:
+                name = tc.function.name
+                args = {}
+                if tc.function.arguments:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except Exception:
+                        args = {}
+                if name == "run_code":
+                    args.setdefault("inputs", {})
+                    args["inputs"].setdefault("files", file_index)
 
-    # The prompt object has a 'template' attribute which holds the string
-    original_template = prompt.template
+                result = call_tool(name, args)
+                # Tool response must immediately follow the assistant tool_calls message
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": name,
+                    "content": json.dumps(result) if not isinstance(result, str) else result,
+                })
 
-    # Define your custom lines to be added
-    custom_lines = """
-    Final Answer formating:
-    Your final answer MUST be a single, valid JSON array containing the answers to all questions, in the exact order they were asked.
-    - If an answer is a number, use the number type (e.g., 42 or 0.485).
-    - If an answer is a string, enclose it in double quotes (e.g., "Titanic").
-    - If an answer is a plot, return only the base64 data URI string.
-    - Do not add any explanatory text outside of the JSON array.
-    
-    Additional Info: If Possible to give a numeric answer, give a numeric digit only.
-    For example: Count ofs questions, etc
-    Also compress any image generated.
-    """
+            # Continue loop: the next completion will use the appended tool messages
+            continue
 
-    # Combine the original template with your custom lines
-    new_template = original_template + "\n" + custom_lines
+        # No tool calls → final answer
+        final_text = msg.content or ""
+        return final_text
 
-    # Create a new PromptTemplate instance from the modified string
-    prompt = PromptTemplate.from_template(new_template)
-    
-    agent = create_react_agent(llm, tools_for_this_request, prompt)
-    
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools_for_this_request,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=10
-    )
-    
-    agent_input = {"input": questions_text}
-    
+# -----------------------------------------------------------------------------
+# Single POST endpoint at /api/ [1][4][5]
+# -----------------------------------------------------------------------------
+def try_parse_json(s: str):
     try:
-        response = agent_executor.invoke(agent_input)
-        output_str = response.get('output', '{}')
-        
-        try:
-            return json.loads(output_str)
-        except json.JSONDecodeError:
-            return {"answer": output_str}
+        return True, json.loads(s)
+    except Exception:
+        return False, None
 
+def clamp_size_json(obj, max_bytes=150_000):
+    """Heuristic: try to reduce precision of floats and shorten strings."""
+    def shrink(x):
+        if isinstance(x, float):
+            return float(f"{x:.6g}")  # ~6 significant digits
+        if isinstance(x, str) and len(x) > 2000:
+            return x[:2000] + "...[truncated]"
+        if isinstance(x, list):
+            return [shrink(v) for v in x]
+        if isinstance(x, dict):
+            return {k: shrink(v) for k, v in x.items()}
+        return x
+    shrunk = shrink(obj)
+    data = json.dumps(shrunk, ensure_ascii=False)
+    if len(data.encode("utf-8")) <= max_bytes:
+        return True, data
+    return False, data
+
+@app.route("/api/", methods=["POST"])
+def api():
+    # Require questions.txt in the files
+    if "questions.txt" not in request.files:
+        return jsonify({"error": "questions.txt file is required in multipart/form-data"}), 400
+
+    # Save all incoming files securely
+    saved_index: Dict[str, str] = {}
+    for key, storage in request.files.items():
+        filename = secure_filename(storage.filename)
+        if not filename:
+            continue
+        save_path = os.path.join(UPLOAD_DIR, filename)
+        storage.save(save_path)
+        saved_index[filename] = save_path
+
+    # Load questions.txt
+    qpath = saved_index.get("questions.txt")
+    if not qpath:
+        return jsonify({"error": "questions.txt missing after save"}), 400
+
+    with open(qpath, "r", encoding="utf-8", errors="ignore") as f:
+        questions_text = f.read()
+
+    # Run agent
+    try:
+        result_text = run_agent(questions_text, saved_index)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during agent execution: {str(e)}")
+        print(e)
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+    # If the agent claims to return JSON, validate it to avoid malformed output.
+    try:
+        try:
+            parsee = result_text[7:len(result_text) - 3]
+            parsed = json.loads(parsee.strip())
+            print(type(parsed))
+            return jsonify(parsed), 200  # sets application/json automatically
+        except Exception as e:
+            parsee = result_text + "\"}```"
+            parsee = parsee[7:len(result_text) - 3]
+            parsed = json.loads(parsee.strip())
+            print(type(parsed))
+    except Exception:
+        print("here")
+        return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Start the service
+    logger.info("Starting server on 0.0.0.0:%s (model=%s, upload_dir=%s, image_budget=%d)",
+                os.environ.get("PORT", "8000"), OPENAI_MODEL, UPLOAD_DIR, MAX_IMAGE_BYTES)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
