@@ -148,6 +148,7 @@ def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
         "duckdb": duckdb,
         "plt": plt,
         "sns": sns,
+        "base64": base64,
         "io": io,
         "inputs": inputs,
     }
@@ -180,6 +181,7 @@ def tool_plot_png(code: str) -> Dict[str, Any]:
     allowed_globals = {
         "pd": pd,
         "np": np,
+        "base64": base64,
         "plt": plt,
         "sns": sns,
         "io": io,
