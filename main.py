@@ -51,7 +51,7 @@ def _preview(label: str, obj, limit=500):
 # -----------------------------------------------------------------------------
 load_dotenv()
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-nano")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # set this in environment
 MAX_IMAGE_BYTES = 6_500  # cap for base64 data URIs (approx, after encoding)
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/agent_uploads")
@@ -418,6 +418,7 @@ def api():
             parsee = parsee[7:len(result_text) - 3]
             parsed = json.loads(parsee.strip())
             print(type(parsed))
+            return jsonify(parsed), 200  # sets application/json automatically
     except Exception:
         print("here")
         return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
