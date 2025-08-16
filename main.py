@@ -12,26 +12,22 @@ from werkzeug.utils import secure_filename
 
 from dotenv import load_dotenv
 
-# Web, code, and plotting libs for tools
-import requests  # for fetching web pages [used by the web tool]
+import requests  
 import pandas as pd
 import numpy as np
 import duckdb
 from bs4 import BeautifulSoup
 
-# Plotting and encoding figure to base64 data URI
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# OpenAI SDK (Chat Completions) - the official Python library [12]
 from openai import OpenAI
 
 import logging
 from logging import StreamHandler, Formatter
 
-# Configure logging
 logger = logging.getLogger("agent")
 logger.setLevel(logging.INFO)
 handler = StreamHandler()
@@ -46,14 +42,11 @@ def _preview(label: str, obj, limit=500):
     s = s if len(s) <= limit else s[:limit] + "... [truncated]"
     logger.info("%s: %s", label, s)
 
-# -----------------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------------
 load_dotenv()
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # set this in environment
-MAX_IMAGE_BYTES = 6_500  # cap for base64 data URIs (approx, after encoding)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  
+MAX_IMAGE_BYTES = 6_500  
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/agent_uploads")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -61,9 +54,6 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
-UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 CORS(app, resources={
     r"/api/": {
@@ -75,12 +65,7 @@ CORS(app, resources={
     }
 })
 
-
 logger.info("CORS enabled for /api/ with origins=*, methods=POST,OPTIONS")
-
-# -----------------------------------------------------------------------------
-# Utility: encode matplotlib figure to data URI under a size budget [13][19][10]
-# -----------------------------------------------------------------------------
 
 def fig_to_data_uri_png(fig, max_bytes=MAX_IMAGE_BYTES):
     def encode(dpi):
@@ -94,17 +79,13 @@ def fig_to_data_uri_png(fig, max_bytes=MAX_IMAGE_BYTES):
             return uri
     raise ValueError("Image exceeds size budget; simplify plot or reduce points.")
 
-# -----------------------------------------------------------------------------
-# Tool implementations
-# -----------------------------------------------------------------------------
-
 def tool_web_fetch(url: str) -> Dict[str, Any]:
     """
     Fetch a web page and return:
     {
       "url": str,
       "status": int,
-      "html": str,     # cleaned, plain text without tags
+      "html": str,     
       "tables": List[List[Dict[str, Any]]],  
       "title": str
     }
@@ -121,18 +102,14 @@ def tool_web_fetch(url: str) -> Dict[str, Any]:
         if html:
             soup = BeautifulSoup(html, "html.parser")
 
-            # Extract page title
             title_tag = soup.find("title")
             title = title_tag.text.strip() if title_tag else ""
 
-            # Remove scripts, styles, and irrelevant elements
             for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "meta", "link"]):
                 tag.decompose()
 
-            # Extract cleaned text content
             clean_text = soup.get_text(separator="\n", strip=True)
 
-            # Parse tables with pandas
             try:
                 dfs = pd.read_html(html)
                 logger.info("[tool:web_fetch] parsed %d tables", len(dfs))
@@ -141,7 +118,6 @@ def tool_web_fetch(url: str) -> Dict[str, Any]:
             except ValueError:
                 logger.info("[tool:web_fetch] no HTML tables found")
 
-            # Replace HTML content with clean readable text
             html = clean_text
 
         return {"url": url, "status": status, "html": html, "tables": tables, "title": title}
@@ -158,7 +134,6 @@ def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
     """
     _preview("[tool:run_code] inputs", list(inputs.keys()) if isinstance(inputs, dict) else type(inputs).__name__)
     _preview("[tool:run_code] code", code, limit=800)
-    # Very constrained, no file writes; read-only files via provided paths in inputs
     allowed_globals = {
         "pd": pd,
         "np": np,
@@ -173,11 +148,9 @@ def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
     local_vars: Dict[str, Any] = {}
     stdout_capture = io.StringIO()
     try:
-        # Redirect prints
         import contextlib, sys
         with contextlib.redirect_stdout(stdout_capture):
             exec(code, allowed_globals, local_vars)
-        # Best-effort JSON-ify locals
         def safe(obj):
             try:
                 json.dumps(obj)
@@ -220,10 +193,6 @@ def tool_plot_png(code: str) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("[tool:plot_png] error")
         return {"data_uri": None, "stdout": stdout_capture.getvalue(), "error": f"{e}\n{traceback.format_exc()}"}
-
-# -----------------------------------------------------------------------------
-# OpenAI tool definitions (function calling) [14][12]
-# -----------------------------------------------------------------------------
 
 def get_tool_schemas() -> List[Dict[str, Any]]:
     return [
@@ -272,10 +241,6 @@ def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return tool_plot_png(**arguments)
     return {"error": f"Unknown tool: {name}"}
 
-# -----------------------------------------------------------------------------
-# Core agent loop
-# -----------------------------------------------------------------------------
-
 SYSTEM_PROMPT = (
     "You are an agentic AI that reads a questions.txt, optional extra files, "
     "and uses tools to fetch web data, analyze with Python, and plot. "
@@ -323,10 +288,8 @@ def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
 
         msg = completion.choices[0].message
 
-        # If the assistant requests tools, run them and append tool messages
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
-            # Append the assistant message that requested tools
             messages.append({
                 "role": "assistant",
                 "content": msg.content or None,
@@ -339,7 +302,6 @@ def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
                 for tc in tool_calls],
             })
 
-            # For each tool call, execute and add a corresponding tool message
             for tc in tool_calls:
                 name = tc.function.name
                 args = {}
@@ -353,7 +315,6 @@ def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
                     args["inputs"].setdefault("files", file_index)
 
                 result = call_tool(name, args)
-                # Tool response must immediately follow the assistant tool_calls message
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -361,16 +322,11 @@ def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
                     "content": json.dumps(result) if not isinstance(result, str) else result,
                 })
 
-            # Continue loop: the next completion will use the appended tool messages
             continue
 
-        # No tool calls → final answer
         final_text = msg.content or ""
         return final_text
 
-# -----------------------------------------------------------------------------
-# Single POST endpoint at /api/ [1][4][5]
-# -----------------------------------------------------------------------------
 def try_parse_json(s: str):
     try:
         return True, json.loads(s)
@@ -381,7 +337,7 @@ def clamp_size_json(obj, max_bytes=150_000):
     """Heuristic: try to reduce precision of floats and shorten strings."""
     def shrink(x):
         if isinstance(x, float):
-            return float(f"{x:.6g}")  # ~6 significant digits
+            return float(f"{x:.6g}") 
         if isinstance(x, str) and len(x) > 2000:
             return x[:2000] + "...[truncated]"
         if isinstance(x, list):
@@ -395,69 +351,63 @@ def clamp_size_json(obj, max_bytes=150_000):
         return True, data
     return False, data
 
-@app.post("/api/")
+@app.route("/api/", methods=["POST"])
 def api():
-    if not request.files:
-        return jsonify({"error": "No files in multipart/form-data"}), 400
-
+    for i in request.files:
+        logger.info("[file name]: " + i)
     if "questions.txt" not in request.files:
-        return jsonify({
-            "error": "questions.txt file is required in multipart/form-data",
-            "hint": 'Use: curl -F "questions.txt=@question.txt" -F "image.png=@image.png" -F "data.csv=@data.csv" https://app.example.com/api/'
-        }), 400
+        print("here")
+        return jsonify({"error": "questions.txt file is required in multipart/form-data"}), 400
 
-    saved_index = {}
+    saved_index: Dict[str, str] = {}
     for key, storage in request.files.items():
-        client_name = storage.filename or key
-        safe_client_name = secure_filename(client_name) or secure_filename(key) or "file"
-        base, ext = os.path.splitext(safe_client_name)
-        candidate = safe_client_name
-        i = 1
-        while os.path.exists(os.path.join(UPLOAD_DIR, candidate)):
-            candidate = f"{base}_{i}{ext}"
-            i += 1
-        save_path = os.path.join(UPLOAD_DIR, candidate)
+        filename = secure_filename(storage.filename)
+        if not filename:
+            continue
+        save_path = os.path.join(UPLOAD_DIR, filename)
         storage.save(save_path)
-        saved_index[key] = save_path
+        saved_index[filename] = save_path
 
-    qpath = saved_index.get("questions.txt")
+    print(saved_index)
+    qpath = saved_index.get("question.txt")
     if not qpath:
+        print("here2")
         return jsonify({"error": "questions.txt missing after save"}), 400
 
-    try:
-        with open(qpath, "r", encoding="utf-8", errors="ignore") as f:
-            questions_text = f.read()
-    except Exception as e:
-        logger.exception("Failed to read questions.txt")
-        return jsonify({"error": f"Failed to read questions.txt: {e}"}), 400
+    with open(qpath, "r", encoding="utf-8", errors="ignore") as f:
+        questions_text = f.read()
 
     try:
         result_text = run_agent(questions_text, saved_index)
     except Exception as e:
-        logger.exception("Agent error")
+        print(e)
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
-    cleaned = (result_text or "").strip()
-    if cleaned.startswith("```
-        cleaned = cleaned[len("```json"):].lstrip()
-    if cleaned.endswith("```"):
-        cleaned = cleaned[: -len("```")].rstrip()
-
     try:
-        parsed = json.loads(cleaned)
+        cleaned = result_text.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+
+        parsed = json.loads(cleaned.strip())
+
         if isinstance(parsed, dict):
             answers = list(parsed.values())
         elif isinstance(parsed, list):
             answers = parsed
         else:
             answers = [parsed]
+
+        _preview("[Answers Preview]", jsonify(answers))
         return jsonify(answers), 200
+
     except Exception as e:
+        print(result_text)
         logger.error("[api] Failed to parse JSON: %s", e)
         return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
-    # Start the service
     logger.info("Starting server on 0.0.0.0:%s (model=%s, upload_dir=%s, image_budget=%d)",
                 os.environ.get("PORT", "8000"), OPENAI_MODEL, UPLOAD_DIR, MAX_IMAGE_BYTES)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
