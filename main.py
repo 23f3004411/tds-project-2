@@ -412,13 +412,17 @@ def api():
             parsee = result_text[7:len(result_text) - 3]
             parsed = json.loads(parsee.strip())
             print(type(parsed))
-            return jsonify(parsed), 200  # sets application/json automatically
         except Exception as e:
             parsee = result_text + "\"}```"
             parsee = parsee[7:len(result_text) - 3]
             parsed = json.loads(parsee.strip())
-            print(type(parsed))
-            return jsonify(parsed), 200  # sets application/json automatically
+            print(type(parsed))  # sets application/json automatically
+        
+        if isinstance(parsed, dict):
+            parsed = list(parsed.values())
+
+        return jsonify(parsed), 200
+
     except Exception:
         print("here")
         return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
