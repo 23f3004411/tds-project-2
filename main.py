@@ -407,25 +407,21 @@ def api():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
     # If the agent claims to return JSON, validate it to avoid malformed output.
+
     try:
-        try:
-            parsee = result_text[7:len(result_text) - 3]
-            parsed = json.loads(parsee.strip())
-            print(type(parsed))
-        except Exception as e:
-            parsee = result_text + "\"}```"
-            parsee = parsee[7:len(result_text) - 3]
-            parsed = json.loads(parsee.strip())
-            print(type(parsed))  # sets application/json automatically
-        
-        if isinstance(parsed, dict):
-            parsed = list(parsed.values())
+        parsee = result_text[7:len(result_text) - 3]
+        parsed = json.loads(parsee.strip())
+        print(type(parsed))
+    except Exception as e:
+        parsee = result_text + "\"}```"
+        parsee = parsee[7:len(result_text) - 3]
+        parsed = json.loads(parsee.strip())
+        print(type(parsed))  # sets application/json automatically
+    
+    if isinstance(parsed, dict):
+        parsed = list(parsed.values())
 
-        return jsonify(parsed), 200
-
-    except Exception:
-        print("here")
-        return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
+    return jsonify(parsed), 200
 
 if __name__ == "__main__":
     # Start the service
