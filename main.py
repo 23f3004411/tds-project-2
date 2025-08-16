@@ -163,7 +163,7 @@ def tool_run_code(code: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
         "sns": sns,
         "base64": base64,
         "io": io,
-        "re", re,
+        "re": re,
         "inputs": inputs,
     }
     local_vars: Dict[str, Any] = {}
@@ -197,7 +197,7 @@ def tool_plot_png(code: str) -> Dict[str, Any]:
         "np": np,
         "base64": base64,
         "plt": plt,
-        "re", re,
+        "re": re,
         "sns": sns,
         "io": io,
     }
