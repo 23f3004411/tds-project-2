@@ -412,7 +412,7 @@ def api():
         cleaned = result_text.strip()
         if cleaned.startswith("```json"):
             cleaned = cleaned[7:]
-        if cleaned.endswith("```
+        if cleaned.endswith("```"):
             cleaned = cleaned[:-3]
 
         parsed = json.loads(cleaned.strip())
