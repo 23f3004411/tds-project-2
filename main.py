@@ -279,6 +279,7 @@ SYSTEM_PROMPT = (
     "(for example, a JSON array or object). Never hard-code answers; compute them. "
     "When returning plots, ensure data URIs are PNG and stay under 100,000 bytes."
     "Use only pandas as pd, numpy as np, duckdb and duckdb, matplotlib as plt, seaborn as sns in python. NO OTHER LIBRARY! No need To convert anything to Base64 yourself, just give a plot"
+    "Check varaiable names!"
 )
 
 def run_agent(questions_text: str, file_index: Dict[str, str]) -> str:
@@ -393,7 +394,7 @@ def clamp_size_json(obj, max_bytes=150_000):
 @app.route("/api/", methods=["POST"])
 def api():
     # Require questions.txt in the files
-    if "questions.txt" not in request.files:
+    if "question.txt" not in request.files:
         return jsonify({"error": "questions.txt file is required in multipart/form-data"}), 400
 
     # Save all incoming files securely
