@@ -440,7 +440,7 @@ def api():
     cleaned = (result_text or "").strip()
     if cleaned.startswith("```
         cleaned = cleaned[len("```json"):].lstrip()
-    if cleaned.endswith("```
+    if cleaned.endswith("```"):
         cleaned = cleaned[: -len("```")].rstrip()
 
     try:
