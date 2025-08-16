@@ -407,21 +407,29 @@ def api():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
     # If the agent claims to return JSON, validate it to avoid malformed output.
-
     try:
-        parsee = result_text[7:len(result_text) - 3]
-        parsed = json.loads(parsee.strip())
-        print(type(parsed))
-    except Exception as e:
-        parsee = result_text + "\"}```"
-        parsee = parsee[7:len(result_text) - 3]
-        parsed = json.loads(parsee.strip())
-        print(type(parsed))  # sets application/json automatically
-    
-    if isinstance(parsed, dict):
-        parsed = list(parsed.values())
+        # Remove Markdown fences if present
+        cleaned = result_text.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        if cleaned.endswith("```
+            cleaned = cleaned[:-3]
 
-    return jsonify(parsed), 200
+        parsed = json.loads(cleaned.strip())
+
+        # Always convert dict → list of answers
+        if isinstance(parsed, dict):
+            answers = list(parsed.values())
+        elif isinstance(parsed, list):
+            answers = parsed
+        else:
+            answers = [parsed]
+
+        return jsonify(answers), 200
+
+    except Exception as e:
+        logger.error("[api] Failed to parse JSON: %s", e)
+        return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
     # Start the service
