@@ -51,7 +51,7 @@ def _preview(label: str, obj, limit=500):
 # -----------------------------------------------------------------------------
 load_dotenv()
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-nano")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # set this in environment
 MAX_IMAGE_BYTES = 6_500  # cap for base64 data URIs (approx, after encoding)
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/agent_uploads")
