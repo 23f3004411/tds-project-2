@@ -100,8 +100,8 @@ def tool_web_fetch(url: str) -> Dict[str, Any]:
     {
       "url": str,
       "status": int,
-      "html": str,
-      "tables": List[List[Dict[str, Any]]],  # parsed tables via pandas.read_html if possible
+      "html": str,     # cleaned, plain text without tags
+      "tables": List[List[Dict[str, Any]]],  
       "title": str
     }
     """
@@ -113,22 +113,35 @@ def tool_web_fetch(url: str) -> Dict[str, Any]:
         html = resp.text if resp.ok else ""
         title = ""
         tables = []
+
         if html:
             soup = BeautifulSoup(html, "html.parser")
+
+            # Extract page title
             title_tag = soup.find("title")
             title = title_tag.text.strip() if title_tag else ""
+
+            # Remove scripts, styles, and irrelevant elements
+            for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "meta", "link"]):
+                tag.decompose()
+
+            # Extract cleaned text content
+            clean_text = soup.get_text(separator="\n", strip=True)
+
+            # Parse tables with pandas
             try:
-                # Use pandas to parse HTML tables directly if any
                 dfs = pd.read_html(html)
                 logger.info("[tool:web_fetch] parsed %d tables", len(dfs))
-                # Convert to records for LLM consumption
                 for df in dfs:
                     tables.append(json.loads(df.to_json(orient="records")))
             except ValueError:
                 logger.info("[tool:web_fetch] no HTML tables found")
-                # No tables found
-                pass
+
+            # Replace HTML content with clean readable text
+            html = clean_text
+
         return {"url": url, "status": status, "html": html, "tables": tables, "title": title}
+
     except Exception as e:
         logger.exception("[tool:web_fetch] error: %s", e)
         return {"url": url, "status": 0, "error": str(e), "html": "", "tables": [], "title": ""}
