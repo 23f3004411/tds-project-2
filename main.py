@@ -61,6 +61,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 CORS(app, resources={
     r"/api/": {
@@ -71,6 +74,7 @@ CORS(app, resources={
         "max_age": 600
     }
 })
+
 
 logger.info("CORS enabled for /api/ with origins=*, methods=POST,OPTIONS")
 
@@ -391,58 +395,63 @@ def clamp_size_json(obj, max_bytes=150_000):
         return True, data
     return False, data
 
-@app.route("/api/", methods=["POST"])
+@app.post("/api/")
 def api():
-    # Require questions.txt in the files
-    if "question.txt" not in request.files:
-        return jsonify({"error": "questions.txt file is required in multipart/form-data"}), 400
+    if not request.files:
+        return jsonify({"error": "No files in multipart/form-data"}), 400
 
-    # Save all incoming files securely
-    saved_index: Dict[str, str] = {}
+    if "questions.txt" not in request.files:
+        return jsonify({
+            "error": "questions.txt file is required in multipart/form-data",
+            "hint": 'Use: curl -F "questions.txt=@question.txt" -F "image.png=@image.png" -F "data.csv=@data.csv" https://app.example.com/api/'
+        }), 400
+
+    saved_index = {}
     for key, storage in request.files.items():
-        filename = secure_filename(storage.filename)
-        if not filename:
-            continue
-        save_path = os.path.join(UPLOAD_DIR, filename)
+        client_name = storage.filename or key
+        safe_client_name = secure_filename(client_name) or secure_filename(key) or "file"
+        base, ext = os.path.splitext(safe_client_name)
+        candidate = safe_client_name
+        i = 1
+        while os.path.exists(os.path.join(UPLOAD_DIR, candidate)):
+            candidate = f"{base}_{i}{ext}"
+            i += 1
+        save_path = os.path.join(UPLOAD_DIR, candidate)
         storage.save(save_path)
-        saved_index[filename] = save_path
+        saved_index[key] = save_path
 
-    # Load questions.txt
     qpath = saved_index.get("questions.txt")
     if not qpath:
         return jsonify({"error": "questions.txt missing after save"}), 400
 
-    with open(qpath, "r", encoding="utf-8", errors="ignore") as f:
-        questions_text = f.read()
+    try:
+        with open(qpath, "r", encoding="utf-8", errors="ignore") as f:
+            questions_text = f.read()
+    except Exception as e:
+        logger.exception("Failed to read questions.txt")
+        return jsonify({"error": f"Failed to read questions.txt: {e}"}), 400
 
-    # Run agent
     try:
         result_text = run_agent(questions_text, saved_index)
     except Exception as e:
-        print(e)
+        logger.exception("Agent error")
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
-    # If the agent claims to return JSON, validate it to avoid malformed output.
+    cleaned = (result_text or "").strip()
+    if cleaned.startswith("```
+        cleaned = cleaned[len("```json"):].lstrip()
+    if cleaned.endswith("```
+        cleaned = cleaned[: -len("```")].rstrip()
+
     try:
-        # Remove Markdown fences if present
-        cleaned = result_text.strip()
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-
-        parsed = json.loads(cleaned.strip())
-
-        # Always convert dict → list of answers
+        parsed = json.loads(cleaned)
         if isinstance(parsed, dict):
             answers = list(parsed.values())
         elif isinstance(parsed, list):
             answers = parsed
         else:
             answers = [parsed]
-
         return jsonify(answers), 200
-
     except Exception as e:
         logger.error("[api] Failed to parse JSON: %s", e)
         return Response(result_text, status=200, mimetype="text/plain; charset=utf-8")
