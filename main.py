@@ -46,7 +46,7 @@ load_dotenv()
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  
-MAX_IMAGE_BYTES = 6_500  
+MAX_IMAGE_BYTES = 6_000  
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/tmp/agent_uploads")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
